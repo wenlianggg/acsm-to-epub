@@ -10,4 +10,5 @@ services:
     volumes:
       - ./input:/home/libgourou/input
       - ./output:/home/libgourou/output
+      - ./output_kepub:/home/libgourou/output_kepub
       - ./creds:/home/libgourou/.adept
