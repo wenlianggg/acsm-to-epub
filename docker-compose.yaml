@@ -1,0 +1,13 @@
+services:
+  libgourou:
+    container_name: libgourou
+    build: ./image
+    command:
+      - ./dedrm_all.sh 
+    # entrypoint:
+    #   - sleep
+    #   - infinity
+    volumes:
+      - ./input:/home/libgourou/input
+      - ./output:/home/libgourou/output
+      - ./creds:/home/libgourou/.adept
