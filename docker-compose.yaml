@@ -7,8 +7,26 @@ services:
     # entrypoint:
     #   - sleep
     #   - infinity
+    profiles:
+      - cli
     volumes:
       - ./input:/home/libgourou/input
       - ./output:/home/libgourou/output
       - ./output_kepub:/home/libgourou/output_kepub
       - ./creds:/home/libgourou/.adept
+
+  bot:
+    container_name: book_bot
+    build: ./image
+    entrypoint:
+      - python3
+      - bot.py
+    profiles:
+      - bot
+    env_file:
+      - .env
+    volumes:
+      - ./input:/home/libgourou/input
+      - ./output:/home/libgourou/output
+      - ./output_kepub:/home/libgourou/output_kepub
+      - ./usercreds:/home/libgourou/credentials
