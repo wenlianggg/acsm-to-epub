@@ -21,6 +21,11 @@ services:
     entrypoint:
       - python3
       - bot.py
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
     profiles:
       - bot
     env_file:
