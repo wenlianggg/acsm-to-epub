@@ -88,6 +88,25 @@ def _has_tokendecoded(user_id: str) -> bool:
     return os.path.exists(p) and os.path.getsize(p) > 0
 
 
+def _is_admin(user_id: int) -> bool:
+    admin_id = os.getenv("ADMIN_USER_ID", "")
+    return bool(admin_id) and str(user_id) == admin_id
+
+
+async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not update.message:
+        return
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("Unauthorized.")
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /generate <name>")
+        return
+    name = context.args[0]
+    token = encrypt_auth_token(name)
+    await update.message.reply_text(f"Token for '{name}':\n`{token}`", parse_mode="Markdown")
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     args = context.args
@@ -154,9 +173,9 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return hashlib.sha256(file_id.encode()).hexdigest()[:10]
 
     short_hash = generate_short_hash(file_id)
-    file_name = document.file_name
+    file_name = os.path.basename(document.file_name or "")
 
-    if not file_name.lower().endswith('.acsm'):
+    if not file_name or not file_name.lower().endswith('.acsm'):
         await update.message.reply_text("Please upload a valid file.")
         return
     
@@ -281,8 +300,8 @@ def main():
     token = os.environ["BOT_TOKEN"]
     application = Application.builder().token(token).build()
 
-    # Add a command handler for the /start command
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("generate", generate))
 
     # Message handlers for file uploads
     application.add_handler(MessageHandler(filters.Document.ALL, handle_file_upload))

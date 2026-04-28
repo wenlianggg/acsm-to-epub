@@ -1,4 +1,4 @@
-FROM bcliang/docker-libgourou:ubuntu
+FROM docker.io/bcliang/docker-libgourou:ubuntu
 
 RUN apt update && apt install -y curl python3-pip
 

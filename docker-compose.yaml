@@ -10,10 +10,10 @@ services:
     profiles:
       - cli
     volumes:
-      - ./input:/home/libgourou/input
-      - ./output:/home/libgourou/output
-      - ./output_kepub:/home/libgourou/output_kepub
-      - ./creds:/home/libgourou/.adept
+      - ./input:/home/libgourou/input:z
+      - ./output:/home/libgourou/output:z
+      - ./output_kepub:/home/libgourou/output_kepub:z
+      - ./creds:/home/libgourou/.adept:z
 
   bot:
     container_name: book_bot
@@ -32,7 +32,7 @@ services:
     env_file:
       - .env
     volumes:
-      - ./input:/home/libgourou/input
-      - ./output:/home/libgourou/output
-      - ./output_kepub:/home/libgourou/output_kepub
-      - ./usercreds:/home/libgourou/credentials
+      - ./input:/home/libgourou/input:z
+      - ./output:/home/libgourou/output:z
+      - ./output_kepub:/home/libgourou/output_kepub:z
+      - ./usercreds:/home/libgourou/credentials:z
