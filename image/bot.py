@@ -3,11 +3,121 @@ import subprocess
 import logging
 import shutil
 import hashlib
+import base64
+import secrets
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from dotenv import load_dotenv
+from pathlib import Path
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
+# Load .env from repository root and ensure AUTH_KEY_BASE64 exists
+_repo_root = Path(__file__).resolve().parents[1]
+_env_path = _repo_root / ".env"
+load_dotenv(dotenv_path=_env_path)
+
+def _ensure_and_set_auth_key(env_path: Path):
+    """Generate and persist AUTH_KEY_BASE64 in .env if missing."""
+    if os.getenv("AUTH_KEY_BASE64"):
+        return
+    key = secrets.token_bytes(32)
+    key_b64 = base64.urlsafe_b64encode(key).decode()
+    # append to .env
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    with env_path.open("a", encoding="utf-8") as f:
+        f.write("\n# Auto-generated AUTH_KEY_BASE64\n")
+        f.write(f"AUTH_KEY_BASE64={key_b64}\n")
+    os.environ["AUTH_KEY_BASE64"] = key_b64
+
+_ensure_and_set_auth_key(_env_path) 
+
+def _get_auth_key() -> bytes:
+    """Return the raw AES key from the environment variable AUTH_KEY_BASE64.
+    The env var must be base64-urlsafe encoded and decode to 16/24/32 bytes.
+    """
+    key_b64 = os.getenv("AUTH_KEY_BASE64")
+    if not key_b64:
+        raise RuntimeError("AUTH_KEY_BASE64 env var is required for authorization tokens")
+    try:
+        key = base64.urlsafe_b64decode(key_b64)
+    except Exception as exc:
+        raise RuntimeError("AUTH_KEY_BASE64 must be valid base64") from exc
+    if len(key) not in (16, 24, 32):
+        raise RuntimeError("AUTH_KEY_BASE64 must decode to 16/24/32 bytes")
+    return key
+
+
+def decrypt_auth_token(token_b64: str) -> str:
+    """Decrypt a token produced by encrypt_auth_token and return the plaintext string."""
+    try:
+        data = base64.urlsafe_b64decode(token_b64.encode())
+    except Exception as exc:
+        raise ValueError("invalid base64 token") from exc
+    if len(data) < 13:
+        raise ValueError("invalid token")
+    nonce = data[:12]
+    ct = data[12:]
+    aesgcm = AESGCM(_get_auth_key())
+    pt = aesgcm.decrypt(nonce, ct, None)
+    return pt.decode()
+
+
+def encrypt_auth_token(user_id: str) -> str:
+    """Create a base64-urlsafe token for the given user id. Returns a short base64 string."""
+    nonce = secrets.token_bytes(12)
+    aesgcm = AESGCM(_get_auth_key())
+    pt = f"bookbot:{user_id}".encode()
+    ct = aesgcm.encrypt(nonce, pt, None)
+    return base64.urlsafe_b64encode(nonce + ct).decode()
+
+
+def _tokendecoded_dir(user_id: str) -> str:
+    return os.path.join("/home/libgourou/credentials", str(user_id), ".tokendecoded")
+
+
+def _write_tokendecoded(user_id: str, payload: str):
+    d = _tokendecoded_dir(user_id)
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, "payload.txt")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(payload)
+
+
+def _has_tokendecoded(user_id: str) -> bool:
+    p = os.path.join(_tokendecoded_dir(user_id), "payload.txt")
+    return os.path.exists(p) and os.path.getsize(p) > 0
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    args = context.args
+
+    if not args or len(args) < 1:
+        if not _has_tokendecoded(user_id):
+            await update.message.reply_text(
+                "Please provide your authorization token when using /start, e.g. `/start <token>`"
+            )
+            return
+        await update.message.reply_text("Using existing saved credentials.")
+    else:
+        token = args[0]
+        try:
+            plaintext = decrypt_auth_token(token)
+        except Exception:
+            await update.message.reply_text("Invalid authorization token.")
+            return
+        if not plaintext.startswith("bookbot:"):
+            await update.message.reply_text("Invalid authorization token")
+            return
+        payload = plaintext.split(":", 1)[1].strip()
+        if not payload:
+            await update.message.reply_text("Invalid token payload.")
+            return
+
+        # Save payload into credentials/.tokendecoded
+        _write_tokendecoded(user_id, payload)
+        await update.message.reply_text("Authorization successful and payload saved. You no longer need to provide the token.")
+
     user_directory = f"/home/libgourou/credentials/{user_id}"
 
     # Create a directory for the user if it doesn't exist
@@ -27,6 +137,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+
+    # Ensure the user has completed token-based auth at least once
+    if not _has_tokendecoded(user_id):
+        await update.message.reply_text("You must authenticate first with `/start <token>` before uploading files.")
+        return
+
     document = update.message.document
     
     if not document:
@@ -67,7 +183,7 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 total_size += os.path.getsize(fp)
         return total_size
 
-    if get_directory_size(input_path) > 10 * 1024 * 1024:
+    if get_directory_size(input_path) > 100 * 1024 * 1024:
         await update.message.reply_text("Your directory is too large. Please delete some files and try again.")
         return
 
