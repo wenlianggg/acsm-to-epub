@@ -28,7 +28,7 @@ KEPUBIFY = "/home/libgourou/kepubify-linux-64bit"
 
 # ---- Limits ----
 ACSM_MAX_BYTES = 1 * 1024 * 1024
-EPUB_MAX_BYTES = 50 * 1024 * 1024
+EPUB_MAX_BYTES = 200 * 1024 * 1024
 USER_INPUT_QUOTA_BYTES = 100 * 1024 * 1024
 
 
@@ -124,45 +124,76 @@ def _directory_size(directory: str) -> int:
     return total
 
 
-async def _run_or_report(update: Update, args: list, error_msg: str):
-    """Run a subprocess; on failure, message the user and re-raise."""
+def _format_size(num_bytes: int) -> str:
+    n = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{int(n)}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}TB"
+
+
+class StatusMessage:
+    """A single Telegram message that gets edited as the pipeline progresses."""
+
+    def __init__(self, message):
+        self._message = message
+        self._lines = [message.text or ""]
+
+    @classmethod
+    async def send(cls, update: Update, text: str) -> "StatusMessage":
+        assert update.message is not None
+        msg = await update.message.reply_text(text)
+        return cls(msg)
+
+    async def append(self, line: str):
+        self._lines.append(line)
+        try:
+            await self._message.edit_text("\n\n".join(self._lines))
+        except Exception as exc:
+            logging.warning("Failed to edit status message: %s", exc)
+
+
+async def _run_or_report(status: StatusMessage, args: list, error_msg: str):
+    """Run a subprocess; on failure, update the status message and re-raise."""
     try:
         subprocess.run(args, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
-        await update.message.reply_text(error_msg)
-        await update.message.reply_text(f"Error: {e.stdout} {e.stderr}")
+        await status.append(error_msg)
+        await status.append(f"Error: {e.stdout} {e.stderr}")
         raise
 
 
 # ---- Pipeline steps ----
-async def download_acsm_content(update, adept_path, acsm_file, work_dir) -> str:
+async def download_acsm_content(status: StatusMessage, adept_path, acsm_file, work_dir) -> str:
     await _run_or_report(
-        update,
+        status,
         [ACSM_DOWNLOADER, "-f", acsm_file, "-O", work_dir, "-D", adept_path],
         "Error downloading ACSM content.",
     )
     file_name = os.listdir(work_dir)[0]
-    await update.message.reply_text(f"Downloaded '{file_name}' from content provider.")
+    size = _format_size(os.path.getsize(os.path.join(work_dir, file_name)))
+    await status.append(f"Downloaded protected '{file_name}' ({size}) from content provider.")
     return file_name
 
 
-async def adept_remove(update, file_name, adept_path, work_dir):
+async def adept_remove(status: StatusMessage, file_name, adept_path, work_dir):
     await _run_or_report(
-        update,
+        status,
         [ADEPT_REMOVE, "-f", os.path.join(work_dir, file_name), "-D", adept_path],
         "Error running dedrm.",
     )
-    await update.message.reply_text(f"Processed file '{file_name}'!")
+    await status.append(f"Removed Adept DRM from '{file_name}'!")
 
 
-async def kepubify(update, file_name, output_path, work_dir) -> str:
+async def kepubify(status: StatusMessage, file_name, output_path, work_dir) -> str:
     kepub_file = os.path.join(output_path, file_name).replace(".epub", ".kepub.epub")
     await _run_or_report(
-        update,
+        status,
         [KEPUBIFY, os.path.join(work_dir, file_name), "-o", kepub_file],
         "Error converting to KEPUB.",
     )
-    await update.message.reply_text(f"Converted '{file_name}' to KEPUB!")
+    await status.append(f"Converted '{file_name}' to kepub with kepubify!")
     return kepub_file
 
 
@@ -190,15 +221,15 @@ async def _send_document_with_retry(context, chat_id, file_path: str):
 
 
 async def send_files(update, context, file_name, output_path, kepub_file: Optional[str], send_original: bool = True):
-    await update.message.reply_text(f"Finished processing '{file_name}'!")
+    assert update.message is not None
 
     if send_original:
-        ext = file_name.rsplit(".", 1)[-1].upper() if "." in file_name else "FILE"
+        ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else "FILE"
         await update.message.reply_text(f"Sending you the {ext} file now!")
         await _send_document_with_retry(context, update.message.chat_id, os.path.join(output_path, file_name))
 
     if kepub_file:
-        await update.message.reply_text("Sending you the KEPUB file now!")
+        await update.message.reply_text("Sending you the kepub file now!")
         await _send_document_with_retry(context, update.message.chat_id, kepub_file)
 
 
@@ -263,6 +294,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raise e
 
 
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not update.message:
+        return
+    user_id = update.effective_user.id
+    uploaded = _directory_size(os.path.join(INPUT_DIR, str(user_id)))
+    processed = _directory_size(os.path.join(OUTPUT_DIR, str(user_id)))
+    await update.message.reply_text(
+        f"To date, you ({user_id}) have uploaded {_format_size(uploaded)} "
+        f"and processed {_format_size(processed)} of books!"
+    )
+
+
 async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not update.message:
         return
@@ -305,14 +348,14 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
     file_path = os.path.join(input_path, file_name)
     file = await context.bot.get_file(document.file_id)
     await file.download_to_drive(file_path)
-    await update.message.reply_text(f"Starting to process '{file_name}'!")
+    status = await StatusMessage.send(update, f"Starting to process '{file_name}'!")
 
     work_dir = f"/tmp/{file_path}_epub"
     os.makedirs(work_dir, exist_ok=True)
 
     if is_acsm:
-        file_name = await download_acsm_content(update, adept_path, file_path, work_dir)
-        await adept_remove(update, file_name, adept_path, work_dir)
+        file_name = await download_acsm_content(status, adept_path, file_path, work_dir)
+        await adept_remove(status, file_name, adept_path, work_dir)
     else:
         shutil.copy(file_path, os.path.join(work_dir, file_name))
 
@@ -320,8 +363,19 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     kepub_file = None
     if file_name.lower().endswith(".epub"):
-        kepub_file = await kepubify(update, file_name, output_path, work_dir)
+        kepub_file = await kepubify(status, file_name, output_path, work_dir)
+    await status.append(f"Finished processing '{file_name}'!")
     await send_files(update, context, file_name, output_path, kepub_file, send_original=is_acsm)
+
+
+async def error_handler(_update, context):
+    err = context.error
+    if isinstance(err, subprocess.CalledProcessError):
+        logging.warning("Pipeline subprocess failed (already reported to user): %s", err)
+    elif isinstance(err, (NetworkError, TimedOut)):
+        logging.warning("Telegram network error: %s", err)
+    else:
+        logging.error("Unhandled exception", exc_info=err)
 
 
 def main():
@@ -329,6 +383,9 @@ def main():
     application = (
         Application.builder()
         .token(token)
+        .base_url("http://telegram_bot_api:8081/bot")
+        .base_file_url("http://telegram_bot_api:8081/file/bot")
+        .local_mode(True)
         .connect_timeout(30)
         .read_timeout(120)
         .write_timeout(600)
@@ -338,7 +395,9 @@ def main():
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("generate", generate))
+    application.add_handler(CommandHandler("stats", stats))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_file_upload))
+    application.add_error_handler(error_handler)
 
     application.run_polling()
 

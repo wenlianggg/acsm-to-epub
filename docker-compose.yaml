@@ -31,8 +31,29 @@ services:
       - bot
     env_file:
       - .env
+    depends_on:
+      - telegram_bot_api
     volumes:
       - ./input:/home/libgourou/input:z
       - ./output:/home/libgourou/output:z
       - ./output_kepub:/home/libgourou/output_kepub:z
       - ./usercreds:/home/libgourou/credentials:z
+      - ./bot-api-data:/var/lib/telegram-bot-api:z
+
+  telegram_bot_api:
+    container_name: telegram_bot_api
+    image: docker.io/aiogram/telegram-bot-api:latest
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    profiles:
+      - bot
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_LOCAL: 1
+    volumes:
+      - ./bot-api-data:/var/lib/telegram-bot-api:z

@@ -3,3 +3,4 @@
 *.env
 creds/
 usercreds/
+bot-api-data/
